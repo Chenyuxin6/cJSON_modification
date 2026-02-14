@@ -29,8 +29,8 @@
 #endif
 /*_MSC_VER is a macro of Visual C++ compiler. 
 So defined(_MSC_VER) means the compiler is Visual C++.
-The whole setence means when _CRT_SECURE_NO_DEPRECATE is not defined and the compiler is Visual C++,
-define the _CRT_SECURE_NO_DEPRECATE macro.*/
+The whole setence means when _CRT_SECURE_NO_DEPRECATE is not defined and 
+the compiler is Visual C++, define the _CRT_SECURE_NO_DEPRECATE macro.*/
 
 #ifdef __GNUC__
 #pragma GCC visibility push(default)
