@@ -27,10 +27,17 @@
 #if !defined(_CRT_SECURE_NO_DEPRECATE) && defined(_MSC_VER)
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
+/*_MSC_VER is a macro of Visual C++ compiler. 
+So defined(_MSC_VER) means the compiler is Visual C++.
+The whole setence means when _CRT_SECURE_NO_DEPRECATE is not defined and the compiler is Visual C++,
+define the _CRT_SECURE_NO_DEPRECATE macro.*/
 
 #ifdef __GNUC__
 #pragma GCC visibility push(default)
 #endif
+/*It is used to set the visibility of symbols. 
+"push(default)" sets the current symbol visibility to the default state.*/
+
 #if defined(_MSC_VER)
 #pragma warning (push)
 /* disable warning about single line comments in system headers */
