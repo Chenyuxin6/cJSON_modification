@@ -93,16 +93,26 @@ the compiler is Visual C++, define the _CRT_SECURE_NO_DEPRECATE macro.*/
 #endif
 
 typedef struct {
-    const unsigned char *json;
-    size_t position;
+    const unsigned char *json;  //`json` is a pointer to data of type `unsigned char`, used for storing JSON data.
+    size_t position;       /*size_t represents the position information. 
+                            It may be used to record the position of errors in the JSON data.*/
 } error;
+
+/*A static global variable of type "error" named "global_error" was defined.
+ it was initialized with a JSON pointer set to NULL and a position of 0.*/
 static error global_error = { NULL, 0 };
 
+/*cJSON_GetErrorPtr's purpose is to obtain the error pointer. 
+ It returns a const char pointer that points to the position of the json pointer 
+ within the global_error structure.*/
 CJSON_PUBLIC(const char *) cJSON_GetErrorPtr(void)
 {
     return (const char*) (global_error.json + global_error.position);
 }
 
+/*cJSON_GetStringValue is used to obtain the string-type value within the cJSON object.*/
+/*Check if the input item is of string type. If not, return NULL.
+ If it is of string type, return the valuestring member of the item, which is the pointer pointing to the string value stored.*/
 CJSON_PUBLIC(char *) cJSON_GetStringValue(const cJSON * const item)
 {
     if (!cJSON_IsString(item))
@@ -113,6 +123,9 @@ CJSON_PUBLIC(char *) cJSON_GetStringValue(const cJSON * const item)
     return item->valuestring;
 }
 
+/*cJSON_GetNumberValue is used to obtain the value of the numeric type within the cJSON object.*/
+/*Determine whether the input item is of a numeric type. If not, return NAN.
+ If it is a numeric type, return the valuedouble member of the item, which is the double-type value storing the numeric value.*/
 CJSON_PUBLIC(double) cJSON_GetNumberValue(const cJSON * const item)
 {
     if (!cJSON_IsNumber(item))
