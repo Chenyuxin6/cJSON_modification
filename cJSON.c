@@ -1143,110 +1143,175 @@ static parse_buffer *skip_utf8_bom(parse_buffer * const buffer)
     return buffer;
 }
 
+/* 简单介绍：带选项的JSON解析入口函数，自动计算输入长度并调用底层解析函数 
+   参数值：指向待解析的JSON字符串（以'\0'结尾）
+   return_parse_end是输出参数，返回解析结束位置的指针，可用于检查后续垃圾数据
+   require_null_terminated表示是否要求输入必须严格以'\0'终止
+   cJSON *指的是return cJSON*——成功则只想解析出的根节点，失败则返回NULL 
+   主要流程：①空指针检查，防止非法输入
+            ②计算缓冲区长度，包含'\0'终止符，确保严格模式下的边界检查
+            ③调用cJSON_ParseWithLengthOpts，委托底层实现完成解析
+    存储器内存管理：无直接分配：仅计算长度并转发调用，内存分配由底层函数负责
+                  生命周期：返回的cJSON节点由调用者负责释放（用cJSON_Delete） */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
-    size_t buffer_length;
+    /* 声明一个名为buffer_length的变量，其数据类型为size_t。
+    size_t是一种无符号整数类型。它后续会用于存储相关缓冲区的长度等计算结果 */
+    size_t buffer_length; 
 
     if (NULL == value)
     {
-        return NULL;
+        return NULL; /* 输入字符串为空指针，直接返回失败 */
     }
 
+    /* 计算缓冲区长度，strlen(value)是有效字符数，+1包含'\0'终止符 
+       严格模式下需要检查'\0'，所以必须包含终止符的长度 */
     /* Adding null character size due to require_null_terminated. */
     buffer_length = strlen(value) + sizeof("");
 
     return cJSON_ParseWithLengthOpts(value, buffer_length, return_parse_end, require_null_terminated);
 }
 
+/* 简单介绍：底层核心cJSON解析函数，支持指定缓冲区长度、解析结束位置和严格模式
+   参数值：指向待解析的JSON字符串（不一定以'\0'结尾）
+   buffer_length：缓冲区总长度，包含所有待解析字符，不含'\0'时需要注意
+   return_parse_end：输出参数，返回解析结束位置的指针，可用于检查后续垃圾数据
+   require_null_terminated表示是否要求输入必须严格以'\0'终止
+   cJSON *指的是return cJSON*——成功则只想解析出的根节点，失败则返回NULL 
+   主要流程：①初始化解析缓冲区，绑定输入字符串、长度、偏移量、内存钩子
+            ②空输入检查，防止空字符串或零长度缓冲区
+            ③分配根节点，作为解析结果的容器
+            ④调用parse_value，递归解析所有JSON类型（包括对象/数组/字符串/数字等）
+            ⑤严格模式检查，验证'\0'终止符，过滤垃圾数据
+            ⑥设置解析结束位置，输出给调用者
+            ⑦失败处理，释放已分配内存，设置全局错误信息
+    存储器内存管理：分配：cJSON_New_Item 分配根节点（sizeof(cJSON)），parse_value 递归分配子节点
+                  释放：解析失败时通过 cJSON_Delete 释放整个节点树，避免内存泄漏
+                  生命周期：返回的根节点由调用者负责释放（cJSON_Delete），失败时函数内部完成清理*/
 /* Parse an object - create a new root, and populate. */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
-    parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };
-    cJSON *item = NULL;
+    parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } }; /* 初始化解析缓冲区，清零所有字段 */
+    cJSON *item = NULL; /* 根节点指针，最终返回解析结果 */
 
+    /* 重置全局错误状态，每次解析前清空之前的错误信息 */
     /* reset error position */
     global_error.json = NULL;
     global_error.position = 0;
 
+    /* 空输入检查：输入字符串为空或缓冲区长度为0，直接返回失败 */
     if (value == NULL || 0 == buffer_length)
     {
-        goto fail;
+        goto fail; /* 跳转到失败处理标签 */
     }
 
-    buffer.content = (const unsigned char*)value;
-    buffer.length = buffer_length;
-    buffer.offset = 0;
-    buffer.hooks = global_hooks;
+    /* 初始化解析缓冲区，绑定输入字符串、长度、偏移量和内存钩子 */
+    buffer.content = (const unsigned char*)value; /* 输入字符串转为无符号字符指针（处理UTF-8） */
+    buffer.length = buffer_length; /* 缓冲区总长度 */
+    buffer.offset = 0; /* 初始解析偏移量，从字符串开头开始 */
+    buffer.hooks = global_hooks; /* 使用全局内存分配钩子，默认malloc//free */
 
+    /* 分配根节点，作为解析结果的容器 */
     item = cJSON_New_Item(&global_hooks);
-    if (item == NULL) /* memory fail */
+    if (item == NULL) /* memory fail   内存分配失败（堆耗尽），直接返回失败 */
     {
         goto fail;
     }
 
+    /* 核心解析逻辑：调用 parse_value 递归解析所有 JSON 类型 */
+    /* parse_value 会根据第一个字符判断类型（'{'指对象，'['指数组，'"'指字符串等） */
+    /* skip_utf8_bom：跳过UTF-8 BOM头（\xEF\xBB\xBF），兼容带BOM的JSON文件 */
     if (!parse_value(item, buffer_skip_whitespace(skip_utf8_bom(&buffer))))
     {
+        /* parse_value返回false：解析失败，错误信息已通过global_error记录 */
         /* parse failure. ep is set. */
         goto fail;
     }
 
+    /* 严格模式检查：如果要求'\0'终止，跳过空白后检查是否为'\0' */
+    /* 过滤JSON后的垃圾数据（如 "{...} garbage"），确保解析结果纯净 */
     /* if we require null-terminated JSON without appended garbage, skip and then check for a null terminator */
     if (require_null_terminated)
     {
-        buffer_skip_whitespace(&buffer);
+        buffer_skip_whitespace(&buffer); /* 跳过解析结束后的所有空白字符 */
+        /* 检查是否越界或当前字符不是'\0'，存在垃圾数据，解析失败 */
         if ((buffer.offset >= buffer.length) || buffer_at_offset(&buffer)[0] != '\0')
         {
             goto fail;
         }
     }
+    
+    /* 设置解析结束位置：输出的调用者，用于检查解析范围 */
     if (return_parse_end)
     {
-        *return_parse_end = (const char*)buffer_at_offset(&buffer);
+        *return_parse_end = (const char*)buffer_at_offset(&buffer); /* 返回当前偏移量对应的字符指针 */
     }
 
-    return item;
+    return item; /* 解析成功，返回根节点指针 */
 
+/* 失败处理标签：集中释放内存，设置错误信息，避免重复代码 */
 fail:
+    /* 释放已分配的根节点：cJSON_Delete会递归释放所有子节点，防止内存泄漏 */
     if (item != NULL)
     {
         cJSON_Delete(item);
     }
 
+    /* 设置局部错误信息：用于返回给调用者，替代全局错误，线程更安全 */
     if (value != NULL)
     {
+        /* 声明了一个local_error变量，其类型error类型 ，用于存储与局部错误相关的信息*/
         error local_error;
+        /* 复制错误信息到局部变量，避免全局状态被覆盖 */
         local_error.json = (const unsigned char*)value;
         local_error.position = 0;
 
+        /* 计算错误位置：如果解析过程中偏移量未到缓冲区末尾，错误位置为当前偏移量 */
         if (buffer.offset < buffer.length)
         {
             local_error.position = buffer.offset;
         }
+        /* 如果缓冲区长度大于0，错误位置为最后一个字符（边界错误） */
         else if (buffer.length > 0)
         {
             local_error.position = buffer.length - 1;
         }
 
+        /* 如果需要返回解析结束位置，设置为错误位置 */
         if (return_parse_end != NULL)
         {
             *return_parse_end = (const char*)local_error.json + local_error.position;
         }
 
+        /* 更新全局错误信息：供上层调用者检查 */
         global_error = local_error;
     }
 
-    return NULL;
+    return NULL; /* 解析失败，返回NULL */
 }
 
+/* 简单介绍：默认选项的JSON解析函数，对外暴露的简化接口 
+   参数值：指向待解析的JSON字符串（以'\0'结尾）
+   cJSON *指的是return cJSON*——成功则只想解析出的根节点，失败则返回NULL 
+   主要流程：①调用cJSON_ParseWithOpts，使用默认参数，不返回解析结束位置，不要求严格终止
+   存储器内存管理：无直接分配：委托底层函数处理
+                 生命周期：返回的cJSON节点有调用者负责释放（用cJSON_Delete） */
 /* Default options for cJSON_Parse */
 CJSON_PUBLIC(cJSON *) cJSON_Parse(const char *value)
 {
-    return cJSON_ParseWithOpts(value, 0, 0);
+    return cJSON_ParseWithOpts(value, 0, 0); /* /* 默认参数：return_parse_end=NULL, require_null_terminated=0 */ */
 }
 
+/* 简单介绍：指定长度的JSON解析函数，对外暴露的简化接口
+   参数值：指向待解析的JSON字符串（不一定以'\0'结尾）
+   buffer_length：缓冲区总长度，包含所有的待解析字符
+   cJSON *指的是return cJSON*——成功则只想解析出的根节点，失败则返回NULL 
+   主要流程：①调用cJSON_ParseWithOpts，使用默认参数，不返回解析结束位置，不要求严格终止
+   存储器内存管理：无直接分配：委托底层函数处理
+                 生命周期：返回的cJSON节点有调用者负责释放（用cJSON_Delete） */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_length)
 {
-    return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0);
+    return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0); /* 默认参数：return_parse_end=NULL, require_null_terminated=0 */
 }
 
 #define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
