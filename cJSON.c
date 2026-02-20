@@ -93,7 +93,7 @@ the compiler is Visual C++, define the _CRT_SECURE_NO_DEPRECATE macro.*/
 #endif
 
 typedef struct {
-    const unsigned char *json;  //`json` is a pointer to data of type `unsigned char`, used for storing JSON data.
+    const unsigned char *json;  /*`json` is a pointer to data of type `unsigned char`, used for storing JSON data.*/
     size_t position;       /*size_t represents the position information. 
                             It may be used to record the position of errors in the JSON data.*/
 } error;
@@ -1669,121 +1669,174 @@ static cJSON_bool print_array(const cJSON * const item, printbuffer * const outp
 }
 
 /* Build an object from the text. */
+/* 简单介绍：解析JSON文本中的对象（{}包裹的键值对集合），构建cJSON链表 结构
+   参数项：待填充的cJSON根节点，即输出参数，函数会将其标记为对象类型并关联子节点
+   参数input_buffer是输入输出参数，解析缓存区，包含待解析字符数组、当前偏移量、嵌套深度和内存分配钩子等
+   cJSON_bool指会返回true表解析成功，返回false表解析失败，可能是因为语法错误或内存不足或嵌套超限等原因*/
+/* 主要流程：1.嵌套深度检查（防止深层嵌套导致栈溢出）
+            2.校验对象起始符'{'，确认是合法对象开头
+            3.处理空对象（{}），直接标记类型并返回
+            4.循环解析键值对：
+              ①分配新节点，来存储单个键值对
+              ②解析键名，并存入节点string字段
+              ③校验键值分隔符':'是否符合JSON语法
+              ④解析值（支持所有JSON类型），填充节点对应字段
+              ⑤逗号分隔符检查，决定是否继续循环
+            5.校验对象结束符'}'，来确认对象闭合
+            6.构建双向循环列表，关联所有键值对节点*/
+/* 存储器内存管理：分配：通过cJSON_New_Item调用input_buffer->hooks中的malloc分配单个cJSON节点,大小为sizeof(cJSON)
+                 释放：解析失败时通过 cJSON_Delete 递归释放已分配的键值对链表，避免内存泄漏
+                 生命周期：解析成功后，节点链表由外部调用者负责释放；失败时函数内部完成清理*/
 static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer)
 {
-    cJSON *head = NULL; /* linked list head */
-    cJSON *current_item = NULL;
+    cJSON *head = NULL; /* linked list head   键值对链表头指针，最终赋值给item->child */
+    cJSON *current_item = NULL; /* 遍历链表的当前节点指针，始终指向链表尾部 */
 
+    /* 嵌套深度检查：防止恶意深层嵌套JSON导致栈/内存溢出    CJSON_NESTING_LIMIT默认为1000，是cJSON定义的最大嵌套层级 */
     if (input_buffer->depth >= CJSON_NESTING_LIMIT)
     {
-        return false; /* to deeply nested */
+        return false; /* to deeply nested     嵌套层级超限，直接返回失败 */
     }
-    input_buffer->depth++;
+    input_buffer->depth++; /* 进入对象层级，深度+1（与success处的depth--成对） */
 
+    /* 校验JSON对象起始符'{'：必须以'{'为开头才是合法对象 
+       cannot_access_at_index检查缓冲区当前offset是否越界，避免内存呢访问错误
+       buffer_at_offset获取缓存区offset位置的字符 */
     if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != '{'))
     {
-        goto fail; /* not an object */
+        goto fail; /* not an object     无字符/首字符非'{'，不是合法对象，按失败处理 */
     }
 
-    input_buffer->offset++;
-    buffer_skip_whitespace(input_buffer);
+    input_buffer->offset++; /* 指针偏移，跳过'{'，指向后续内容 */
+    buffer_skip_whitespace(input_buffer); /* 跳过所有空白字符（包括空格/制表符/换行等），JSON语法允许任意空白 */
+    
+    /* 处理空对象{}：跳过空白后直接遇到'}'，无需解析键值对 
+       can_access_at_index反向检查，确认offset位置有可访问字符 */
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == '}'))
     {
-        goto success; /* empty object */
+        goto success; /* empty object     空对象解析完成，跳转到成功处理 */
     }
 
+    /* 边界校验：跳过空白后缓冲区一结束，不完整的对象（如'{'），解析失败 */
     /* check if we skipped to the end of the buffer */
     if (cannot_access_at_index(input_buffer, 0))
     {
-        input_buffer->offset--;
-        goto fail;
+        input_buffer->offset--; /* 指针回退，恢复到跳过空白前的位置，保证后续解析上下文正确 */
+        goto fail; /* 缓冲区越界，跳转到失败处理 */
     }
 
+    /* 指针回退，为do-while循环做准备，循环会先执行offset++，避免跳过第一个键 */
     /* step back to character in front of the first element */
     input_buffer->offset--;
+    
+    /* 循环解析键值对：do-while保证至少执行一次（非空对象至少有一个键值对） 
+       循环终止条件：当前字符非逗号或缓冲区越界 */
     /* loop through the comma separated array elements */
     do
     {
+        /* 分配新cJSON节点，存储单个键值对*/
+        /* cJSON_New_Item：调用input_buffer->hooks->malloc分配sizeof(cJSON)大小的内容*/
         /* allocate next item */
         cJSON *new_item = cJSON_New_Item(&(input_buffer->hooks));
         if (new_item == NULL)
         {
-            goto fail; /* allocation failure */
+            goto fail; /* allocation failure    内存分配失败，跳转到失败处理（释放已分配节点） */
         }
 
+        /* 将新节点添加到双向链表，维护链表头和尾指针 */
         /* attach next item to list */
         if (head == NULL)
         {
+            /* 第一个节点：维护链表头和尾指针 */
             /* start the linked list */
             current_item = head = new_item;
         }
         else
         {
+            /* 非第一个节点：尾部追加，更新双向链表的prev/next指针 */
             /* add to the end and advance */
-            current_item->next = new_item;
-            new_item->prev = current_item;
-            current_item = new_item;
+            current_item->next = new_item; /* 原尾节点next指向新节点 */
+            new_item->prev = current_item; /* 新节点prev指向原尾节点 */
+            current_item = new_item; /* 当前节点移动到新尾部 */
         }
 
+        /* 边界校验：逗号后必须有内容 */
+        /* 检查offset+1的位置，避免逗号后直接结束 */
         if (cannot_access_at_index(input_buffer, 1))
         {
-            goto fail; /* nothing comes after the comma */
+            goto fail; /* nothing comes after the comma   逗号后无内容，JSON格式非法，跳转到失败处理 */
         }
 
+        /* 解析键名：JSON对象的键必须是双引号包裹的字符串 */
         /* parse the name of the child */
-        input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        input_buffer->offset++; /* 指针偏移，跳过逗号或对象起始后的第一个字符 */
+        buffer_skip_whitespace(input_buffer); /* 跳过键名前的空白字符 */
+        /* parse_strinf：解析字符串并将结果存入new_item->valuestring */
         if (!parse_string(current_item, input_buffer))
         {
-            goto fail; /* failed to parse name */
+            goto fail; /* failed to parse name   域名解析失败（非字符串），跳转到失败处理 */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace(input_buffer); /* 跳过键名后的空白字符，准备解析冒号 */
 
+        /* 调整键名存储位置：cJSON节点的string字段存键名，valuestring存字符串值 */
+        /* parse_string将键名存入valuestring，需交换到string字段 */
         /* swap valuestring and string, because we parsed the name */
-        current_item->string = current_item->valuestring;
-        current_item->valuestring = NULL;
+        current_item->string = current_item->valuestring; /* 键名移到string字段 */
+        current_item->valuestring = NULL; /* 清空valuestring，为解析值做准备 */
 
+        /* 校验键值分隔符':'：JSON语法要求键和值直接按必须有冒号 */
         if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != ':'))
         {
-            goto fail; /* invalid object */
+            goto fail; /* invalid object   无字符/非冒号，格式非法，跳转到失败处理 */
         }
 
+        /* 解析键对应的值，支持字符串/数字/布尔/数组/对象等所有的JSON类型 */
         /* parse the value */
-        input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        input_buffer->offset++; /* 指针偏移，跳过冒号 */
+        buffer_skip_whitespace(input_buffer); /* 跳过冒号后的空白字符 */
+        /* parse_value：万能值解析函数，填充current_item的类型和值字段 */
         if (!parse_value(current_item, input_buffer))
         {
-            goto fail; /* failed to parse value */
+            goto fail; /* failed to parse value   值解析失败，跳转到失败处理 */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace(input_buffer); /* 跳过值后的空白字符，准备检查逗号 */
     }
     while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
+    /* 循环终止逻辑：ccan_access_at_index判断缓冲区未越界 && 当前字符是逗号，还有下一个键值对 
+       只有两个条件都满足才继续循环，否则终止循环 */
 
-    if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != '}'))
+    /* 校验对象结束符'}'：循环结束后必须一'}'闭合 */
+       if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != '}'))
     {
-        goto fail; /* expected end of object */
+        goto fail; /* expected end of object   无字符/非'}'，对象未闭合，跳转到失败处理 */
     }
 
+/* 域名解析成功处理标签：集中处理成功逻辑，避免重复代码 */
 success:
-    input_buffer->depth--;
+    input_buffer->depth--; /* 嵌套深度回退，退出对象层级，与开头的depth++成对 */
 
+    /* 构建双向循环链表：链表头的prev指向链表尾，实现闭环，方便反向遍历 */
     if (head != NULL) {
-        head->prev = current_item;
+        head->prev = current_item; /* 链表头prev指向尾节点 */
     }
 
-    item->type = cJSON_Object;
-    item->child = head;
+    /* 填充根节点，标记类型为对象，关联键值对链表 */
+    item->type = cJSON_Object; /* 标记根节点为JSON对象类型 */
+    item->child = head; /* 根节点child指向键值对链表头 */
 
-    input_buffer->offset++;
-    return true;
+    input_buffer->offset++; /* 指针偏移，跳过'}'字符，准备解析后续内容 */
+    return true; /* 解析成功，返回true */
 
+/* 解析失败处理标签：集中释放内存，避免内存泄露 */
 fail:
+    /* 释放已分配的键值对链表：cJSON_Delete会递归释放整个链表 */
+    /* 释放时机：解析失败时立即释放，防止malloc的内存未free */    
     if (head != NULL)
     {
-        cJSON_Delete(head);
+        cJSON_Delete(head); /* 释放链表内存，head是链表头指针 */
     }
 
-    return false;
+    return false; /* 解析失败，返回false */
 }
 
 /* Render an object to text. */
