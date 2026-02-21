@@ -1299,7 +1299,7 @@ fail:
 /* Default options for cJSON_Parse */
 CJSON_PUBLIC(cJSON *) cJSON_Parse(const char *value)
 {
-    return cJSON_ParseWithOpts(value, 0, 0); /* /* 默认参数：return_parse_end=NULL, require_null_terminated=0 */ */
+    return cJSON_ParseWithOpts(value, 0, 0);  /* 默认参数：return_parse_end=NULL, require_null_terminated=0 */ 
 }
 
 /* 简单介绍：指定长度的JSON解析函数，对外暴露的简化接口
@@ -1316,131 +1316,220 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_len
 
 #define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
 
+/* 简单介绍：底层核心JSON渲染函数，负责分配缓冲区并调用print_value生成JSON文本
+   参数值：指向待渲染的cJSON根节点
+   format表示是否启用格式化（true表带缩进换行，false表紧凑无空白）
+   hooks是内存操作钩子（allocate/reallocate/deallocate)，用于管理缓冲区内存
+   unsigned char *表示：成功则指向生成的JSON字符串，失败则返回NULL
+   主要流程：①初始化缓冲区上下文，清零缓冲区结构体，设置默认大小256字节
+            ②分配初始缓存区，使用hooks->allocate分配默认大小的内存
+            ③调用print_value，递归渲染所有节点到缓冲区
+            ④处理缓冲区扩容，支持reallocate时直接扩容，否则复制到新缓冲区
+            ⑤终止符处理，手动添加'\0'，确保生成合法C字符串
+            ⑥失败处理，释放所有已分配内存，避免泄露
+    存储器内存管理：初始分配 256字节缓冲区，不足时通过reallocate或新分配扩容
+                  释放：失败时释放所有已分配内存；成功后返回的字符串由调用者释放
+                  边界安全：确保缓冲区大小至少为offset + 1，为'\0'终止符预留空间 */
 static unsigned char *print(const cJSON * const item, cJSON_bool format, const internal_hooks * const hooks)
 {
+    /* 默认缓冲区大小256字节，适合大多数小型JSON，减小重分配次数 */
     static const size_t default_buffer_size = 256;
+    /* 打进缓冲区上下文，存储缓冲区指针、长度、偏移量、格式化和内存钩子 */
     printbuffer buffer[1];
+    /* 最终返回的JSON字符串指针 */
     unsigned char *printed = NULL;
 
+    /* 清零缓冲区上下文，确保所有字段初始为0，避免未初始化值导致的错误 */
     memset(buffer, 0, sizeof(buffer));
 
+    /* 分配初始缓存区，使用内存钩子分配默认大小的内存 */
     /* create buffer */
     buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);
-    buffer->length = default_buffer_size;
-    buffer->format = format;
-    buffer->hooks = *hooks;
+    buffer->length = default_buffer_size; /* 缓冲区总长度 */
+    buffer->format = format; /* 格式化标志 */
+    buffer->hooks = *hooks; /* 绑定内存钩子 */
+    
+    /* 检查分配是否成功，内存不足时直接跳转到失败处理 */
     if (buffer->buffer == NULL)
     {
         goto fail;
     }
 
+    /* 核心渲染逻辑：递归渲染所有cJSON节点到缓冲区 */
     /* print the value */
     if (!print_value(item, buffer))
     {
-        goto fail;
+        goto fail; /* 渲染失败，跳转到失败处理 */
     }
+    
+    /* 更新缓冲区偏移量，确保偏移量正确反映已写入的字节数 */
     update_offset(buffer);
 
+    /* 检查是否支持reallocate，支持则直接扩容，避免内存复制 */
     /* check if reallocate is available */
     if (hooks->reallocate != NULL)
     {
+        /* 扩容缓冲区，大小为当前偏移量+1（为'\0'预留空间） */
         printed = (unsigned char*) hooks->reallocate(buffer->buffer, buffer->offset + 1);
         if (printed == NULL) {
-            goto fail;
+            goto fail; /* 扩容失败，跳转到失败处理 */
         }
         buffer->buffer = NULL;
     }
-    else /* otherwise copy the JSON over to a new buffer */
+    else /* otherwise copy the JSON over to a new buffer   不支持reallocate，复制到新缓存区 */
     {
+        /* 分配新缓冲区，大小为当前偏移量+1（为'\0'预留空间） */
         printed = (unsigned char*) hooks->allocate(buffer->offset + 1);
         if (printed == NULL)
         {
-            goto fail;
+            goto fail; /* 分配失败，跳转到失败处理 */
         }
+        /* 复制数据，仅复制已使用的部分（buffer->offset字节），避免浪费空间 */
         memcpy(printed, buffer->buffer, cjson_min(buffer->length, buffer->offset + 1));
+        /* 手动添加'\0'，确保生成的字符串时合法的C字符串 */
         printed[buffer->offset] = '\0'; /* just to be sure */
 
-        /* free the buffer */
+        /* free the buffer   释放旧缓存区，避免内存泄漏 */
         hooks->deallocate(buffer->buffer);
         buffer->buffer = NULL;
     }
 
+    /* 渲染成功，返回生成的JSON字符串 */
     return printed;
 
+/* 失败处理标签：集中释放所有已分配的内存，避免内存泄漏 */
 fail:
+    /* 释放初始缓冲区，如果已分配且未移交 */
     if (buffer->buffer != NULL)
     {
         hooks->deallocate(buffer->buffer);
         buffer->buffer = NULL;
     }
 
+    /* 释放最终字符串，如果已分配 */
     if (printed != NULL)
     {
         hooks->deallocate(printed);
         printed = NULL;
     }
 
+    /* 渲染失败，返回NULL */
     return NULL;
 }
 
+/* 简单介绍：将cJSON结构渲染为格式化的JSON文本，带缩进和换行，便于阅读 
+   参数值：指向待渲染的cJSON根节点
+   char*表示成功则指向格式化JSON字符串的指针；失败则返回NULL
+   主要流程：①调用底层print函数，启用格式化（fmt=true），使用全局内存钩子
+            ②返回转换后的字符串指针
+    存储器内存管理：分配：底层print函数通过global_hooks.allocate动态分配输出缓冲区
+                  释放：返回的字符串由调用者负责释放（使用cJSON_free或对应钩子的deallocate）
+                  生命周期：返回的字符串与cJSON节点无关，需单独释放 */
 /* Render a cJSON item/entity/structure to text. */
 CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item)
 {
+    /* 委托底层print函数，启用格式化，使用全局内存钩子 */
     return (char*)print(item, true, &global_hooks);
 }
 
+/* 简单介绍：将ccJSON结构渲染为无格式的JSON文本，紧凑无空白，节省空间 
+   item指向待渲染的cJSON根节点
+   char*表示成功则指向格式化JSON字符串的指针；失败则返回NULL
+   主要流程：①调用底层print函数，禁用格式化（fmt=true），使用全局内存钩子
+            ②返回转换后的字符串指针
+    存储器内存管理：分配：底层print函数通过global_hooks.allocate动态分配输出缓冲区
+                  释放：返回的字符串由调用者负责释放（使用cJSON_free或对应钩子的deallocate）
+                  生命周期：返回的字符串与cJSON节点无关，需单独释放 */
 CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)
 {
+    /* 委托底层print函数，禁用格式化，使用全局内存钩子 */
     return (char*)print(item, false, &global_hooks);
 }
 
+/* 简单介绍：适用预分配缓冲区的JSON渲染函数，可控制初始缓冲区大小，减少重分配
+   item指向待渲染的cJSON根节点
+   prebuffer表示初始缓冲区大小（字节），小于0时直接返回失败
+   fmt表示是否启用格式化，true表带缩进，false表紧凑
+   char*表示成功则指向格式化JSON字符串的指针；失败则返回NULL
+   主要流程：①初始化printbuffer结构体，清零所有字段，准备渲染上下文
+            ②预分配缓冲区，使用global_hooks.allocate分配prebuffer大小的内存
+            ③调用print_value，递归渲染所有节点到缓冲区
+            ④失败处理，释放预分配缓存区，返回NULL
+    存储器内存管理：分配：使用global_hooks.allocate分配prebuffer大小的初始缓冲区
+                  重分配：print_value 程中若缓冲区不足，会通过钩子reallocate扩容
+                  释放：返回的字符串由调用者负责释放（使用cJSON_free或对应钩子的deallocate）
+                  失败时：函数内部释放已分配的缓冲区，避免内存泄漏 */
 CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)
 {
+    /* 初始化打印缓冲区，清零所有字段，构建渲染上下文 */
     printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
 
+    /* 合法性检查，预分配缓冲区大小不能为负数 */
     if (prebuffer < 0)
     {
-        return NULL;
+        return NULL; /* 非法缓冲区大小，直接返回失败 */
     }
 
+    /* 预分配输出缓冲区，使用全局钩子分配prebuffer字节的内存 */
     p.buffer = (unsigned char*)global_hooks.allocate((size_t)prebuffer);
     if (!p.buffer)
     {
-        return NULL;
+        return NULL; /* 内存分配失败，直接返回失败 */
     }
 
-    p.length = (size_t)prebuffer;
-    p.offset = 0;
-    p.noalloc = false;
-    p.format = fmt;
-    p.hooks = global_hooks;
+    /* 初始化缓冲区参数 */
+    p.length = (size_t)prebuffer; /* 缓冲区总长度 */
+    p.offset = 0; /* 初始写入偏移量，从缓冲区开头开始 */
+    p.noalloc = false; /* 允许重分配，缓冲区不足时自动扩容 */
+    p.format = fmt; /* 格式化标志，控制是否带缩进和换行 */
+    p.hooks = global_hooks; /* 使用全局内存钩子 */
 
+    /* 核心渲染逻辑：递归渲染所有节点到缓冲区 */
     if (!print_value(item, &p))
     {
+        /* 渲染失败，释放预分配的缓冲区，避免内存泄漏 */
         global_hooks.deallocate(p.buffer);
         p.buffer = NULL;
         return NULL;
     }
 
+    /* 渲染成功，返回缓冲区指针（转为char*兼容C字符串） */
     return (char*)p.buffer;
 }
 
+/* 简单介绍：使用用户预分配缓冲区的JSON渲染函数（完全由调用者管理内存，无内部分配）
+   item指向待渲染的cJSON根节点
+   buffer指向用户预分配的输出缓冲区（不能为空）
+   length是预分配缓冲区的总长度（字节，必须大于0）
+   format表示是否启用格式化，true表带缩进，false表紧凑
+   cJSON_bool表示true：渲染成功；false：渲染失败（缓冲区不足/空输入）
+   主要流程：①初始化printbuffer结构体，绑定用户提供的缓冲区和长度
+            ②合法性检查，缓冲区为空或长度<=0时直接返回失败
+            ③调用print_value，递归渲染所有节点到用户缓冲区
+            ④返回渲染结果，无需释放内存，缓冲区由调用者管理
+   存储器内存管理：无内部分配：完全使用用户提供的缓冲区，不调用任何allocate/reallocate
+                 无内部释放：缓冲区由调用者负责分配和释放，函数仅写入数据
+                 边界安全：print_value会严格检查缓冲区边界，避免越界写入 */
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format)
 {
+    /* 初始化打印缓冲区，清零所有字段，构建渲染上下文 */
     printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
 
+    /* 合法性检查：用户缓冲区不能为空，长度必须大于0 */
     if ((length < 0) || (buffer == NULL))
     {
-        return false;
+        return false; /* 非法缓冲区，直接返回失败 */
     }
 
-    p.buffer = (unsigned char*)buffer;
-    p.length = (size_t)length;
-    p.offset = 0;
-    p.noalloc = true;
-    p.format = format;
-    p.hooks = global_hooks;
+    /* 绑定用户提供的缓冲区 */
+    p.buffer = (unsigned char*)buffer; /* 绑定用户缓冲区，转为无符号字符指针 */
+    p.length = (size_t)length; /* 缓冲区总长度 */
+    p.offset = 0; /* 初始写入偏移量，从缓冲区开头开始 */
+    p.noalloc = true; /* 禁止重分配，完全使用用户缓冲区，不足时直接失败 */
+    p.format = format; /* 格式化标志，控制是否带缩进和换行 */
+    p.hooks = global_hooks; /* 使用全局内存钩子，仅用于边界检查，不分配内存 */
 
+    /* 核心渲染逻辑：递归渲染所有节点到用户缓冲区 */
     return print_value(item, &p);
 }
 
