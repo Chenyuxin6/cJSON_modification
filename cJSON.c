@@ -1662,102 +1662,149 @@ static cJSON_bool print_value(const cJSON * const item, printbuffer * const outp
     }
 }
 
+/* 简单介绍：从文本中解析JSON数组（由[]包裹的逗号分隔元素），并构建为cJSON链表结构
+   item指向待填充的cJSON根节点，即输出参数，函数会将其标记为数组类型并关联子节点
+   input_buffer解析缓冲区，即输入输出参数，包含待解析字符数组、当前偏移量、嵌套深度、内存钩子等
+   cJSON_bool表示返回true是解析成功，返回false时解析失败（语法错误/内存不足/嵌套超限）
+   主要流程：①嵌套深度检查，防止深层嵌套导致栈溢出
+            ②校验数组起始符'['，确认是合法数组开头
+            ③处理空数组（[]），直接标记类型并返回
+            ④循环解析数组元素：
+              a.分配新节点，存储单个数组元素
+              b.解析元素值（支持所有JSON类型），填充节点对应字段
+              c.逗号分隔符检查，决定是否继续循环
+            ⑤校验数组结束符'['，确认数组闭合
+            ⑥构建双向循环链表，关联所有数组元素节点 
+    存储器内存管理：分配：通过cJSON_New_Item调用input_buffer->hooks->malloc分配单个cJSON节点（大小为sizeof(cJSON)）
+                  释放：解析失败时通过cJSON_Delete递归释放已分配的元素链表，避免内存泄漏
+                  生命周期：解析成功后，元素链表由外部调用者负责释放；失败时函数内部完成清理 */
 /* Build an array from input text. */
 static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buffer)
 {
+    /* 数组元素链表头指针，最终赋值给item->child */
     cJSON *head = NULL; /* head of the linked list */
+    /* 遍历链表的当前节点指针，始终指向链表尾部 */
     cJSON *current_item = NULL;
 
+    /* 嵌套深度检查：防止恶意深层嵌套JSON导致栈/内存溢出 */
+    /* CJSON_NESTING_LIMIT时cJSON定义的最大嵌套层级，默认1000 */
     if (input_buffer->depth >= CJSON_NESTING_LIMIT)
     {
-        return false; /* to deeply nested */
+        return false; /* to deeply nested   嵌套层级超限，直接返回失败 */
     }
-    input_buffer->depth++;
+    input_buffer->depth++; /* 进入数组层级，深度+1（与success处的depth--成对） */
 
+    /* 校验JSON数组起始符'['：必须以'['开头才是合法数组 */
+    /* buffer_at_offset：获取管缓冲区当前offset位置的字符 */
     if (buffer_at_offset(input_buffer)[0] != '[')
     {
         /* not an array */
-        goto fail;
+        goto fail; /* 首字母非'['，不是合法数组，跳转到失败处理 */
     }
 
-    input_buffer->offset++;
-    buffer_skip_whitespace(input_buffer);
+    input_buffer->offset++; /* 指针偏移，跳过'['，指向后续内容 */
+    buffer_skip_whitespace(input_buffer); /* 跳过所有空白字符（空格/制表符/换行等），JSON语法允许任意空白 */
+    
+    /* 处理空数组（[]）：跳过空白后直接遇到'['，无需解析元素 */
     if (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ']'))
     {
         /* empty array */
-        goto success;
+        goto success; /* 空数组解析完成，跳转到成功处理 */
     }
 
+    /* 边界校验：跳过空白后缓冲区已结束，不完整的数组（如'['），解析失败 */
     /* check if we skipped to the end of the buffer */
     if (cannot_access_at_index(input_buffer, 0))
     {
-        input_buffer->offset--;
-        goto fail;
+        input_buffer->offset--; /* 指针回退，恢复到跳过空白之前的位置，保证后续解析上下文正确 */
+        goto fail; /* 缓冲区越界，跳转到失败处理 */
     }
 
+    /* 指针回退，为do-while循环做准备，循环会先执行offset++，避免跳过第一个元素 */
     /* step back to character in front of the first element */
     input_buffer->offset--;
+    
+    /* 循环解析数组元素：do-while保证执行一次，非空数组至少有一个元素 */
+    /* 循环终止条件：当前字符非逗号，或缓冲区越界 */
     /* loop through the comma separated array elements */
     do
     {
+        /* 分配新cJSON节点，存储单个数组元素 */
+        /* cJSON_New_Item：调用input_buffer->hooks->malloc分配sizeof(cJSON)大下的内存。
+           内存分配失败会返回NULL，是常见的异常场景 */
         /* allocate next item */
         cJSON *new_item = cJSON_New_Item(&(input_buffer->hooks));
         if (new_item == NULL)
         {
-            goto fail; /* allocation failure */
+            goto fail; /* allocation failure   内存分配失败，跳转到失败处理，释放已分配节点 */
         }
 
+        /* 将新节点添加到双向链表，维护链表头和尾指针 */
         /* attach next item to list */
         if (head == NULL)
         {
-            /* start the linked list */
+            /* start the linked list   第一个节点，链表头和当前节点都指向新节点 */
             current_item = head = new_item;
         }
         else
         {
+            /* 非第一个节点，尾部追加，更新双向链表的prev/next指针 */
             /* add to the end and advance */
-            current_item->next = new_item;
-            new_item->prev = current_item;
-            current_item = new_item;
+            current_item->next = new_item; /* 原尾节点next指向新节点 */
+            new_item->prev = current_item; /* 新节点prev指向原尾节点 */
+            current_item = new_item; /* 当前节点移动到新尾部 */
         }
 
+        
+        /* 解析数组元素值：支持字符串/数字/布尔/数组/对象等所有JSON类型 */
         /* parse next value */
-        input_buffer->offset++;
-        buffer_skip_whitespace(input_buffer);
+        input_buffer->offset++; /* 指针偏移，跳过逗号，或数组起始后的第一个字符 */
+        buffer_skip_whitespace(input_buffer); /* 跳过元素前的空白字符 */
+        /* parse_value：万能值解析函数，填充new_item的类型和值字段 */
         if (!parse_value(current_item, input_buffer))
         {
-            goto fail; /* failed to parse value */
+            goto fail; /* failed to parse value   元素值解析失败，跳转到失败处理 */
         }
-        buffer_skip_whitespace(input_buffer);
+        buffer_skip_whitespace(input_buffer); /* 跳过元素后的空白字符（准备检查逗号） */
     }
     while (can_access_at_index(input_buffer, 0) && (buffer_at_offset(input_buffer)[0] == ','));
+    /* 循环终止逻辑：条件一，can_access_at_index，缓冲区未越界
+                    条件二，当前字符是逗号，还有下一个数组元素
+                    两个条件都满足则继续循环，否则终止（应遇到'['） */
 
+    /* 校验数组结束符'['：循环结束后必须以']'闭合 */
     if (cannot_access_at_index(input_buffer, 0) || buffer_at_offset(input_buffer)[0] != ']')
     {
-        goto fail; /* expected end of array */
+        goto fail; /* expected end of array   无字符/非']'，数组未闭合，跳转到失败处理 */
     }
 
+/* 解析成功处理标签：集中处理成功逻辑，避免重复代码 */
 success:
-    input_buffer->depth--;
+    input_buffer->depth--; /* 嵌套深度回退，推出数组层级，与开头的depth++成对 */
 
+    /* 构建双向链表，链表头的prev指向链表尾，实现闭环，方便反向通行 */
     if (head != NULL) {
         head->prev = current_item;
     }
 
-    item->type = cJSON_Array;
-    item->child = head;
+    /* 填充根节点，标记类型为数组，关联元素链表 */
+    item->type = cJSON_Array; /* 标记根节点为JSON数组类型 */
+    item->child = head; /* 根节点child指向数组元素链表头 */
 
-    input_buffer->offset++;
+    input_buffer->offset++; /* 指针偏移，跳过']'，准备解析后续内容 */
 
-    return true;
+    return true; /* 解析成功，返回true */
 
+/* 解析失败处理标签：集中释放内存，避免内存泄漏 */
 fail:
-    if (head != NULL)
+/* 释放已分配的数组元素链表：cJSON——Delete会递归释放整个链表，包括所有子节点 
+   释放时机：解析失败时立即释放，防止malloc的内存呢未free */    
+if (head != NULL)
     {
-        cJSON_Delete(head);
+        cJSON_Delete(head); /* 释放链表内存，head时链表头指针 */
     }
 
-    return false;
+    return false; /* 解析失败，返回false */
 }
 
 /* Render an array to text */
