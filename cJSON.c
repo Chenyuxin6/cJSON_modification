@@ -269,28 +269,55 @@ static cJSON *cJSON_New_Item(const internal_hooks * const hooks)
     return node;
 }
 
+/* 简单介绍：递归释放cJSON节点树的内存，防止内存泄漏 
+   item指向待填充的cJSON根节点，可以是任意节点，函数会递归释放其所有子节点的兄弟节点
+   返回void
+   主要流程：①遍历兄弟节点链表，通过while循环逐个处理当前节点及其next指针指向的所有兄弟节点
+            ②递归释放子节点，如果当前节点不是引用类型且有子节点，递归调用cJSON_Delete释放子树
+            ③释放字符串内存，如果节点包含非const的valuestring或string，调用deallocate释放
+            ④释放节点本身，使用global_hooks.deallocate释放当前节点的内存
+            ⑤移动到下一个节点，将item指针移动到next，继续循环直到链表结束
+    存储器内存管理：递归释放：子节点（child）会被递归处理，确保整个子树的内存都被释放
+                  字符串释放：仅释放非const的字符串（const字符串由外部管理，避免重复释放）
+                  引用节点：如果节点是引用类型（cJSON_IsReference），则不释放其子节点和字符串，仅释放节点本身
+                  释放时机：函数调用后，所有相关内存都被释放，指针不再有效*/
 /* Delete a cJSON structure. */
 CJSON_PUBLIC(void) cJSON_Delete(cJSON *item)
 {
-    cJSON *next = NULL;
+    cJSON *next = NULL; /* 临时保存下一个兄弟节点的指针，避免释放当前节点后丢失链表 */
+    
+    /* 遍历兄弟节点链表，直到item为NULL，链表结束 */
     while (item != NULL)
     {
+        /* 先保存下一个兄弟节点的指针，释放当前节点后，item->next将无效 */
         next = item->next;
+        
+        /* 递归释放子节点，如果当前节点不是引用类型且有子节点 */
+        /* cJSON_IsReference：判断节点是否为引用类型，引用类型不拥有子节点的内存 */
         if (!(item->type & cJSON_IsReference) && (item->child != NULL))
         {
-            cJSON_Delete(item->child);
+            cJSON_Delete(item->child); /* 递归释放子节点树*/
         }
+        
+        /* 释放valuestring，如果节点不是引用类型且valuestring非空 */
+        /* valuestring存储JSON字符串类型的值，非引用类型节点拥有该内存 */
         if (!(item->type & cJSON_IsReference) && (item->valuestring != NULL))
         {
-            global_hooks.deallocate(item->valuestring);
-            item->valuestring = NULL;
+            global_hooks.deallocate(item->valuestring); /* 释放字符串内存 */
+            item->valuestring = NULL; /* 清空指针，避免野指针 */
         }
+        
+        /* 释放string，如果节点的string不是const类型且非空 */
+        /* cJSON_StringIsConst：判断string是否为const（const字符串由外部管理，不释放） */
         if (!(item->type & cJSON_StringIsConst) && (item->string != NULL))
         {
-            global_hooks.deallocate(item->string);
-            item->string = NULL;
+            global_hooks.deallocate(item->string); /* 释放字符串内存 */
+            item->string = NULL; /* 清空指针，避免野指针 */
         }
+        
+        /* 释放当前节点本身，使用全局内存钩子释放节点内存 */
         global_hooks.deallocate(item);
+        /* 移动到下一个兄弟节点，继续处理链表的下一个元素 */
         item = next;
     }
 }
