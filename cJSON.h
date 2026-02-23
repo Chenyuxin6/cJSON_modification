@@ -103,23 +103,23 @@ then using the CJSON_API_VISIBILITY flag to "export" the same symbols the way CJ
 typedef struct cJSON
 {
     /* next/prev allow you to walk array/object chains. Alternatively, use GetArraySize/GetArrayItem/GetObjectItem */
-    struct cJSON *next;
-    struct cJSON *prev;
+    struct cJSON *next; /* 指向同级下一个节点 */
+    struct cJSON *prev; /* 指向同级上一个节点 */
     /* An array or object item will have a child pointer pointing to a chain of the items in the array/object. */
-    struct cJSON *child;
+    struct cJSON *child; /* 指向子节点（数组/对象的第一个元素） */
 
     /* The type of the item, as above. */
-    int type;
+    int type; /* 表示节点类型（如Null, Number, String, Array, Object等） */
 
     /* The item's string, if type==cJSON_String  and type == cJSON_Raw */
-    char *valuestring;
+    char *valuestring; /* 字符串类型值 */
     /* writing to valueint is DEPRECATED, use cJSON_SetNumberValue instead */
-    int valueint;
+    int valueint; /* 整型值 */
     /* The item's number, if type==cJSON_Number */
-    double valuedouble;
+    double valuedouble; /* 浮点型值 */
 
     /* The item's name string, if this item is the child of, or is in the list of subitems of an object. */
-    char *string;
+    char *string; /* 对象成员的键名 */
 } cJSON;
 
 typedef struct cJSON_Hooks
