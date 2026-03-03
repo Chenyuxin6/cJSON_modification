@@ -256,6 +256,8 @@ static void create_objects(void)
     cJSON_Delete(root);
 }
 
+void test_print_pretty(void);
+
 int CJSON_CDECL main(void)
 {
     /* print the version */
@@ -263,6 +265,45 @@ int CJSON_CDECL main(void)
 
     /* Now some samplecode for building objects concisely: */
     create_objects();
+    test_print_pretty();
 
     return 0;
+}
+
+
+void test_print_pretty(void)
+{
+    /* 所有变量声明必须放在函数开头（C90核心要求） */
+    cJSON *root = NULL;
+    cJSON *hobbies = NULL;
+    char *compact_str = NULL;
+    char *pretty_str = NULL;
+
+    printf("=== Testing cJSON_PrintPretty ===\n");
+
+    /* 1. 创建JSON对象 */
+    root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "name", "Tom");
+    cJSON_AddNumberToObject(root, "age", 20);
+    cJSON_AddBoolToObject(root, "is_student", 1);
+
+    /* 2. 创建嵌套数组 */
+    hobbies = cJSON_CreateArray();
+    cJSON_AddItemToArray(hobbies, cJSON_CreateString("reading"));
+    cJSON_AddItemToArray(hobbies, cJSON_CreateString("coding"));
+    cJSON_AddItemToObject(root, "hobbies", hobbies);
+
+    /* 3. 紧凑打印（官方原功能） */
+    compact_str = cJSON_Print(root);
+    printf("紧凑格式：\n%s\n\n", compact_str);
+
+    /* 4. 美化打印（新增功能） */
+    pretty_str = cJSON_PrintPretty(root);
+    printf("美化格式：\n%s\n", pretty_str);
+
+    /* 5. 释放内存（避免泄漏） */
+    free(compact_str);
+    free(pretty_str);
+    cJSON_Delete(root);
+    printf("=== Test print pretty passed ===\n\n");
 }

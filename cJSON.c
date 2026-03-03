@@ -3490,3 +3490,166 @@ CJSON_PUBLIC(void) cJSON_free(void *object)
     global_hooks.deallocate(object);
     object = NULL;
 }
+
+/* 内部辅助函数：递归计算美化打印所需的字符串长度（含缩进、换行） */
+static int print_pretty_value(const cJSON *item, int indent, int *length)
+{
+    int i = 0;
+    char temp_buf[256];
+    cJSON *child = NULL;
+
+    if (!item || !length) return 0;
+
+    switch (item->type)
+    {
+        case cJSON_Object:
+        case cJSON_Array:
+        {
+            *length += sprintf(temp_buf, "%s", item->type == cJSON_Object ? "{" : "[");
+            *length += 1;
+            child = item->child;
+            while (child)
+            {
+                for (i = 0; i < indent + 1; i++)
+                {
+                    *length += sprintf(temp_buf, "    ");
+                }
+                if (item->type == cJSON_Object)
+                {
+                    *length += sprintf(temp_buf, "\"%s\": ", child->string);
+                }
+                if (!print_pretty_value(child, indent + 1, length))
+                {
+                    return 0;
+                }
+                if (child->next)
+                {
+                    *length += sprintf(temp_buf, ",");
+                }
+                *length += 1;
+                child = child->next;
+            }
+            for (i = 0; i < indent; i++)
+            {
+                *length += sprintf(temp_buf, "    ");
+            }
+            *length += sprintf(temp_buf, "%s", item->type == cJSON_Object ? "}" : "]");
+            break;
+        }
+        case cJSON_String:
+            *length += sprintf(temp_buf, "\"%s\"", item->valuestring);
+            break;
+        case cJSON_Number:
+            *length += sprintf(temp_buf, "%g", item->valuedouble);
+            break;
+        case cJSON_True:
+            *length += sprintf(temp_buf, "true");
+            break;
+        case cJSON_False:
+            *length += sprintf(temp_buf, "false");
+            break;
+        case cJSON_NULL:
+            *length += sprintf(temp_buf, "null");
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+
+/* 内部辅助函数：递归拼接美化打印的字符串（含缩进、换行） */
+static int print_pretty_value_to_buf(const cJSON *item, int indent, char *buf, int *pos)
+{
+    int i = 0, len = 0;
+    cJSON *child = NULL;
+
+    if (!item || !buf || !pos) return 0;
+
+    switch (item->type)
+    {
+        case cJSON_Object:
+        case cJSON_Array:
+        {
+            len = sprintf(buf + *pos, "%s", item->type == cJSON_Object ? "{" : "[");
+            *pos += len;
+            buf[(*pos)++] = '\n';
+            child = item->child;
+            while (child)
+            {
+                for (i = 0; i < indent + 1; i++)
+                {
+                    len = sprintf(buf + *pos, "    ");
+                    *pos += len;
+                }
+                if (item->type == cJSON_Object)
+                {
+                    len = sprintf(buf + *pos, "\"%s\": ", child->string);
+                    *pos += len;
+                }
+                if (!print_pretty_value_to_buf(child, indent + 1, buf, pos)) return 0;
+                if (child->next) buf[(*pos)++] = ',';
+                buf[(*pos)++] = '\n';
+                child = child->next;
+            }
+            for (i = 0; i < indent; i++)
+            {
+                len = sprintf(buf + *pos, "    ");
+                *pos += len;
+            }
+            len = sprintf(buf + *pos, "%s", item->type == cJSON_Object ? "}" : "]");
+            *pos += len;
+            break;
+        }
+        case cJSON_String:
+            len = sprintf(buf + *pos, "\"%s\"", item->valuestring);
+            *pos += len;
+            break;
+        case cJSON_Number:
+            len = sprintf(buf + *pos, "%g", item->valuedouble);
+            *pos += len;
+            break;
+        case cJSON_True:
+            len = sprintf(buf + *pos, "true");
+            *pos += len;
+            break;
+        case cJSON_False:
+            len = sprintf(buf + *pos, "false");
+            *pos += len;
+            break;
+        case cJSON_NULL:
+            len = sprintf(buf + *pos, "null");
+            *pos += len;
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+/* 对外暴露的美化打印函数 */
+CJSON_PUBLIC (char *) cJSON_PrintPretty(const cJSON *item)
+{
+    int length = 0;
+    char *buf = NULL;
+    int pos = 0;
+
+    if (!item) return NULL;
+
+    /* 第一步：计算需要的内存长度（含缩进、换行） */
+    if (!print_pretty_value(item, 0, &length)) return NULL;
+    length += 1; /* 字符串结束符\0的长度 */
+
+    /* 第二步：动态分配内存（谁申请谁释放，用户需手动free返回的字符串） */
+    buf = (char *)malloc((size_t)length * sizeof(char));
+    if (!buf) return NULL;
+    memset(buf, 0, (size_t)length); /* 初始化内存为0 */
+
+    /* 第三步：将美化后的内容拼接到内存中 */
+    if (!print_pretty_value_to_buf(item, 0, buf, &pos))
+    {
+        free(buf); /* 拼接失败，释放内存，避免泄漏 */
+        return NULL;
+    }
+    return buf;
+}
